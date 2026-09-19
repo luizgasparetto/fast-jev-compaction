@@ -3,6 +3,8 @@ import {
   compactSession,
   decisionLog,
   decisionLogLines,
+  envOptions,
+  register,
   resolveHookConfig,
   summarize,
   toSessionMessages,
@@ -65,6 +67,51 @@ describe('hook config', () => {
       compactAtPercent: 60,
       minReductionRatio: 0.25,
     });
+  });
+});
+
+describe('env options', () => {
+  it('maps FAST_JEV_* variables onto plugin options, numbers parsed', async () => {
+    const env: Record<string, string> = { FAST_JEV_KEEP_THRESHOLD: '0.7', FAST_JEV_MODEL: 'jev-x', FAST_JEV_MAX_STATE_TOKENS: 'nope' };
+    const options = await envOptions({ env: { get: async (name) => env[name] } });
+    expect(options).toEqual({ keepThreshold: 0.7, model: 'jev-x', maxStateTokens: NaN });
+    expect(resolveHookConfig(options)).toMatchObject({ keepThreshold: 0.7, model: 'jev-x' });
+    expect(resolveHookConfig(options)).not.toHaveProperty('maxStateTokens');
+  });
+});
+
+describe('register', () => {
+  function engine(fetchFn: ReturnType<typeof jevFetch>, percent: number) {
+    const handlers: Record<string, (...args: unknown[]) => Promise<unknown>> = {};
+    const logs: string[] = [];
+    const $ = {
+      env: { get: async () => undefined },
+      settings: { read: async () => ({}) },
+      http: { fetch: fetchFn },
+      ui: { log: (t: string) => logs.push(t), toast: () => {} },
+      session: {
+        usage: async () => ({ context: { percent } }),
+        compact: () => handlers['session.compact']!($, { trigger: 'plugin', messages: transcript() }, async () => ({ messages: [] })),
+      },
+    };
+    register(((name: string, handler: (...args: unknown[]) => Promise<unknown>) => { handlers[name] = handler; }) as never, { apiKey: 'k' });
+    const compact = (trigger: string) => handlers['session.compact']!($, { trigger, messages: transcript() }, async () => 'built-in');
+    const turn = () => handlers['turn.complete']!($, {}, async () => 'next');
+    return { compact, turn, logs };
+  }
+
+  it('skips instead of summarizing when it triggered the compaction itself', async () => {
+    const { compact, logs } = engine(async () => ({ status: 500, ok: false, text: 'down' }), 0);
+    expect(await compact('plugin')).toMatchObject({ skip: /Jev request failed \(500\)/ });
+    expect(await compact('auto')).toBe('built-in');
+    expect(logs.filter((l) => l.startsWith('skipped ('))).toHaveLength(1);
+  });
+
+  it('backs off after a skipped auto-compaction until the context grows', async () => {
+    const { turn, logs } = engine(async () => ({ status: 500, ok: false, text: 'down' }), 60);
+    await turn();
+    await turn();
+    expect(logs.filter((l) => l.startsWith('skipped ('))).toHaveLength(1);
   });
 });
 
