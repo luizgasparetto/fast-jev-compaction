@@ -102,8 +102,17 @@ describe('register', () => {
     register(on as never, { apiKey: 'k', preserveRecentMessages: 1 });
     const compact = (trigger: string) => handlers['session.compact']!($, { trigger, messages: transcript() }, async () => 'built-in');
     const turn = () => handlers['turn.complete']!($, {}, async () => 'next');
+    // Drains the turn.step generator over a one-chunk stream, as the engine would.
+    const step = async () => {
+      const stream = (handlers['turn.step'] as (...args: unknown[]) => AsyncGenerator<unknown, unknown>)(
+        $, { turnId: 't', index: 0 }, () => (async function* () { yield 'chunk'; return 'response'; })(),
+      );
+      let last = await stream.next();
+      while (!last.done) last = await stream.next();
+      return last.value;
+    };
     const command = () => handlers['command.run']!($, { command: 'fast-jev', args: '' }, async () => 'built-in') as Promise<{ text: string }>;
-    return { compact, turn, command, logs, store, commands, setTokens: (t: number) => { tokens = t; } };
+    return { compact, turn, step, command, logs, store, commands, setTokens: (t: number) => { tokens = t; } };
   }
 
   it('skips instead of summarizing when it triggered the compaction itself', async () => {
@@ -121,16 +130,18 @@ describe('register', () => {
   });
 
   it('measures the context before and after a compaction and serves /fast-jev', async () => {
-    const { compact, turn, command, store, commands, setTokens } = engine(jevFetch(() => 0.1), 10, 120_000);
+    const { compact, turn, step, command, store, commands, setTokens } = engine(jevFetch(() => 0.1), 10, 120_000);
     await turn();
     expect(commands).toEqual(['fast-jev']);
     expect((await command()).text).toBe('this session: no Jev compaction yet' + '\n' + 'all time: no Jev compaction yet');
+    expect(await step()).toBe('response');
+    expect(store['savings']).toBeUndefined();
     expect(await compact('auto')).toHaveProperty('messages');
     setTokens(30_000);
-    await turn();
+    expect(await step()).toBe('response');
     expect(store['savings']).toEqual({ compactions: 1, tokensBefore: 120_000, tokensAfter: 30_000 });
     expect((await command()).text).toContain('this session: 1 compaction(s), context 120k → 30k tokens (−90k, 75%); 1 summary call(s) avoided (~120k input tokens)');
-    await turn();
+    await step();
     expect((store['savings'] as { compactions: number }).compactions).toBe(1);
   });
 });

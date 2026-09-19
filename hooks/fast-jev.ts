@@ -331,7 +331,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
   let compacting = false;
   let retryAtPercent = 0;
   let session: Savings = { ...NO_SAVINGS };
-  // The context measured before a compaction; its "after" is known at the next turn.
+  // The context measured before a compaction; its "after" is the next request's input.
   let pending: number | undefined;
   // Registered on session.start, or on the first turn when the plugin was loaded mid-session.
   let commandRegistered = false;
@@ -379,6 +379,20 @@ export const register: Register = (on: On, options: PluginOptions) => {
     }
   });
 
+  // The first request after a compaction: its input tokens are the "after".
+  on('turn.step', async function* ($, event, next) {
+    const response = yield* next(event);
+    if (pending === undefined) return response;
+    const before = pending;
+    pending = undefined;
+    const { tokens } = await contextTokens($);
+    if (tokens === undefined) return response;
+    session = add(session, before, tokens);
+    await $.store.set('savings', add(await allTimeSavings($), before, tokens));
+    $.ui.log(`context ${k(before)} → ${k(tokens)} tokens after Jev compaction (−${k(before - tokens)}); /fast-jev for totals`);
+    return response;
+  });
+
   on('turn.complete', async ($, event: TurnCompleteInput, next) => {
     if (!commandRegistered) {
       commandRegistered = true;
@@ -388,12 +402,6 @@ export const register: Register = (on: On, options: PluginOptions) => {
     try {
       const configured = await configure($, options);
       const context = await contextTokens($);
-      if (pending !== undefined && context.tokens !== undefined) {
-        session = add(session, pending, context.tokens);
-        await $.store.set('savings', add(await allTimeSavings($), pending, context.tokens));
-        $.ui.log(`context ${k(pending)} → ${k(context.tokens)} tokens after Jev compaction (−${k(pending - context.tokens)}); /fast-jev for totals`);
-        pending = undefined;
-      }
       const current = context.percent ?? 0;
       if (current < Math.max(configured.compactAtPercent, retryAtPercent)) return next(event);
       compacting = true;

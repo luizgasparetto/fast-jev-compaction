@@ -173,8 +173,8 @@ worth removing (the conversation is left alone and retried 10 points later,
 until Claude Code's own auto-compaction kicks in).
 
 `/fast-jev` shows what it saved: the context window measured (from Claude
-Code's own token counts) right before and right after each compaction that
-replaced the summary, this session and all time, plus the summary calls
+Code's own token counts) right before each compaction that replaced the
+summary and on the first request after it, this session and all time, plus the summary calls
 avoided — each one would have sent that whole context to the model once
 more. The same numbers are logged after every compaction.
 
