@@ -57,6 +57,28 @@ function optionString(options: PluginOptions, key: string): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
+type Env = { env: { get: (name: string) => Promise<string | undefined> } };
+
+/** Plugin options from `FAST_JEV_*` variables, numbers parsed; unset ones are left out. */
+export async function envOptions($: Env): Promise<PluginOptions> {
+  const raw: Record<string, string | undefined> = {
+    keepThreshold: await $.env.get('FAST_JEV_KEEP_THRESHOLD'),
+    preserveRecentMessages: await $.env.get('FAST_JEV_PRESERVE_RECENT_MESSAGES'),
+    compactAtPercent: await $.env.get('FAST_JEV_COMPACT_AT_PERCENT'),
+    minReductionRatio: await $.env.get('FAST_JEV_MIN_REDUCTION_RATIO'),
+    maxStateTokens: await $.env.get('FAST_JEV_MAX_STATE_TOKENS'),
+    maxRequestTokens: await $.env.get('FAST_JEV_MAX_REQUEST_TOKENS'),
+    truncateHeadChars: await $.env.get('FAST_JEV_TRUNCATE_HEAD_CHARS'),
+    model: await $.env.get('FAST_JEV_MODEL'),
+    goal: await $.env.get('FAST_JEV_GOAL'),
+  };
+  const options: Record<string, string | number> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (value) options[key] = key === 'model' || key === 'goal' ? value : Number(value);
+  }
+  return options;
+}
+
 /** Reads the plugin's `userConfig` values; anything missing takes the defaults. */
 export function resolveHookConfig(options: PluginOptions): HookConfig {
   const numbers: Partial<Omit<CompactOptions, 'goal'>> = {};
@@ -256,12 +278,25 @@ function notify(
   $.ui.toast(text, { timeoutMs: 15_000 });
 }
 
+/** The plugin options over the `FAST_JEV_*` environment. */
+async function configure($: Env, options: PluginOptions): Promise<HookConfig> {
+  return resolveHookConfig({ ...(await envOptions($)), ...options });
+}
+
 export const register: Register = (on: On, options: PluginOptions) => {
-  const configured = resolveHookConfig(options);
   let compacting = false;
+  let retryAtPercent = 0;
 
   on('session.compact', async ($, event, next) => {
+    // When this plugin triggered the compaction itself, a fallback would summarize
+    // at compactAtPercent, far earlier than Claude Code would on its own: skip
+    // instead and leave the built-in auto-compaction to its own threshold.
+    const fallback = (reason: string) => {
+      notify($, `${event.trigger === 'plugin' ? 'skipped' : 'fallback to built-in summary'} (${reason})`);
+      return event.trigger === 'plugin' ? { skip: `fast-jev-compaction: ${reason}` } : next(event);
+    };
     try {
+      const configured = await configure($, options);
       const config = { ...configured, apiKey: await getApiKey($, configured) };
       const { result, messages } = await compactSession(event.messages, config, async (url, init) => {
         const response = await $.http.fetch(url, init);
@@ -269,11 +304,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
       });
       for (const line of decisionLogLines(result)) $.ui.log(line);
       if (reductionRatio(result) < config.minReductionRatio) {
-        notify(
-          $,
-          `fallback to built-in summary (below ${percent(config.minReductionRatio)} minimum: ${summarize(result)})`,
-        );
-        return next(event);
+        return fallback(`below ${percent(config.minReductionRatio)} minimum: ${summarize(result)}`);
       }
       notify(
         $,
@@ -281,21 +312,21 @@ export const register: Register = (on: On, options: PluginOptions) => {
       );
       return { messages };
     } catch (error) {
-      notify(
-        $,
-        `fallback to built-in summary (${error instanceof Error ? error.message : String(error)})`,
-      );
-      return next(event);
+      return fallback(error instanceof Error ? error.message : String(error));
     }
   });
 
   on('turn.complete', async ($, event: TurnCompleteInput, next) => {
     if (compacting) return next(event);
     try {
+      const configured = await configure($, options);
       const { context } = await $.session.usage();
-      if ((context.percent ?? 0) < configured.compactAtPercent) return next(event);
+      const current = context.percent ?? 0;
+      if (current < Math.max(configured.compactAtPercent, retryAtPercent)) return next(event);
       compacting = true;
-      await $.session.compact();
+      const result = await $.session.compact();
+      // Nothing to shrink: retry 10 points later, not every turn.
+      retryAtPercent = result.skip ? current + 10 : 0;
     } catch (error) {
       $.ui.log(
         `auto-compact skipped (${error instanceof Error ? error.message : String(error)})`,

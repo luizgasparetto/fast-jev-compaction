@@ -135,28 +135,38 @@ Claude Code 2.1.274 type reference.
 
 ### Install in Claude Code
 
-Function hooks are an early-access Claude Code feature (2.1.274+), so the
-opt-in flag must be set wherever Claude Code runs, e.g. in `~/.claude/settings.json`:
-
-```json
-{ "env": { "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1", "TYPESAFE_API_KEY": "<your key>" } }
-```
-
-Then add this repository as a plugin marketplace and install the plugin,
-either from the shell or as slash commands inside a session:
+One command (Node 18+ and the `claude` CLI on PATH):
 
 ```sh
-claude plugin marketplace add tamaratran/fast-jev-compaction
+npx -y github:luizgasparetto/fast-jev-compaction --key <your TypeSafe key>
+```
+
+It enables function hooks (`env.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` in
+`~/.claude/settings.json`, early-access Claude Code feature, 2.1.274+), adds
+this repository as a plugin marketplace and installs the plugin with the key in
+Claude Code's secure plugin storage. Restart Claude Code or run
+`/reload-plugins`. The key can also come from `TYPESAFE_API_KEY` in the
+environment instead of `--key`.
+
+Manual equivalent:
+
+```sh
+# ~/.claude/settings.json: { "env": { "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1", "TYPESAFE_API_KEY": "<your key>" } }
+claude plugin marketplace add luizgasparetto/fast-jev-compaction
 claude plugin install fast-jev-compaction@fast-jev-compaction
 ```
 
-The install prompts for the plugin options (API key, thresholds, `truncateHeadChars`,
-…); leave them at their defaults to use `TYPESAFE_API_KEY` from the environment.
-Restart Claude Code or run `/reload-plugins`. From then on `/compact` (and
-auto-compaction) goes through Jev: the toast reads
+From then on `/compact` (and auto-compaction) goes through Jev: the toast reads
 `fast-jev-compaction: kept N/M messages, no summary (…)` when the pruned history
-replaced the built-in summary, or `fallback to built-in summary (…)` when Jev
-could not remove enough (short sessions, or when it fails).
+replaced the built-in summary, `fallback to built-in summary (…)` when Jev
+could not remove enough from a `/compact` or an engine auto-compaction, and
+`skipped (…)` when the plugin's own `compactAtPercent` trigger found nothing
+worth removing (the conversation is left alone and retried 10 points later,
+until Claude Code's own auto-compaction kicks in).
+
+Tuning is by environment variable, `FAST_JEV_<OPTION>` in snake case
+(`FAST_JEV_KEEP_THRESHOLD=0.6`, `FAST_JEV_COMPACT_AT_PERCENT=75`, …), for the
+options in [`hooks/README.md`](hooks/README.md).
 
 To run from a checkout without installing: `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude --plugin-dir .`
 from the repository root. No publishing step is required; the marketplace is
