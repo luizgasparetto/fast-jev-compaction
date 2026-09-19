@@ -76,7 +76,7 @@ compaction when `context.percent` reaches `compactAtPercent`, with an
 in-flight guard and that back-off.
 
 The hook measures each compaction that replaced the summary: `context.tokens`
-from `$.session.usage()` right before it and at the next `turn.complete`, kept
+from `$.session.usage()` right before it and after the first request that follows (`turn.step`), kept
 per session in memory and all time in `$.store` under `savings`. `/fast-jev`
 (registered on `session.start`, or on the first turn when the plugin was
 loaded mid-session) prints both, with the summary calls avoided.
