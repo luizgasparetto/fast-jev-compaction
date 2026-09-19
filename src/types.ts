@@ -105,6 +105,13 @@ export interface CompactOptions {
   maxRequestTokens?: number;
   /** Characters of a dropped tool result to retain. Default 300. */
   truncateHeadChars?: number;
+  /**
+   * Fraction of the transcript's characters to remove. Results below
+   * `keepThreshold` are truncated first; whole calls are then dropped, least
+   * needed first by Jev's ranking, only until this reduction is reached.
+   * 0 drops every call below `keepThreshold` instead. Default 0.5.
+   */
+  targetReduction?: number;
 }
 
 export interface ResolvedCompactOptions {
@@ -114,6 +121,7 @@ export interface ResolvedCompactOptions {
   maxStateTokens: number;
   maxRequestTokens: number;
   truncateHeadChars: number;
+  targetReduction: number;
 }
 
 export interface CompactResult {

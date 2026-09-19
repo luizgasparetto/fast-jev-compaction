@@ -69,6 +69,7 @@ export async function envOptions($: Env): Promise<PluginOptions> {
     maxStateTokens: await $.env.get('FAST_JEV_MAX_STATE_TOKENS'),
     maxRequestTokens: await $.env.get('FAST_JEV_MAX_REQUEST_TOKENS'),
     truncateHeadChars: await $.env.get('FAST_JEV_TRUNCATE_HEAD_CHARS'),
+    targetReduction: await $.env.get('FAST_JEV_TARGET_REDUCTION'),
     model: await $.env.get('FAST_JEV_MODEL'),
     goal: await $.env.get('FAST_JEV_GOAL'),
   };
@@ -88,6 +89,7 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
     'maxStateTokens',
     'maxRequestTokens',
     'truncateHeadChars',
+    'targetReduction',
   ] as const) {
     const value = options[key];
     if (typeof value === 'number' && Number.isFinite(value)) numbers[key] = value;
@@ -283,9 +285,68 @@ async function configure($: Env, options: PluginOptions): Promise<HookConfig> {
   return resolveHookConfig({ ...(await envOptions($)), ...options });
 }
 
+/** Tokens saved: contexts measured before and after each compaction that replaced the summary. */
+export type Savings = { compactions: number; tokensBefore: number; tokensAfter: number };
+
+const NO_SAVINGS: Savings = { compactions: 0, tokensBefore: 0, tokensAfter: 0 };
+
+function add(savings: Savings, before: number, after: number): Savings {
+  return {
+    compactions: savings.compactions + 1,
+    tokensBefore: savings.tokensBefore + before,
+    tokensAfter: savings.tokensAfter + after,
+  };
+}
+
+function k(tokens: number): string {
+  return `${Math.round(tokens / 1000)}k`;
+}
+
+export function savingsLine(label: string, s: Savings): string {
+  if (s.compactions === 0) return `${label}: no Jev compaction yet`;
+  const saved = s.tokensBefore - s.tokensAfter;
+  return `${label}: ${s.compactions} compaction(s), context ${k(s.tokensBefore)} → ${k(s.tokensAfter)} tokens (−${k(saved)}, ${Math.round((saved / s.tokensBefore) * 100)}%); ${s.compactions} summary call(s) avoided (~${k(s.tokensBefore)} input tokens)`;
+}
+
+type Store = { store: { get: (key: string) => Promise<unknown>; set: (key: string, value: unknown) => Promise<void> } };
+
+async function allTimeSavings($: Store): Promise<Savings> {
+  return { ...NO_SAVINGS, ...((await $.store.get('savings')) as Partial<Savings> | undefined) };
+}
+
+async function contextTokens($: { session: { usage: () => Promise<{ context: { tokens?: number; percent?: number } }> } }) {
+  return (await $.session.usage()).context;
+}
+
+type Commands = { command: { register: (spec: { name: string; description: string }) => Promise<unknown> } };
+
+async function registerCommand($: Commands): Promise<void> {
+  await $.command.register({
+    name: 'fast-jev',
+    description: 'Tokens saved by Jev compaction, this session and all time.',
+  });
+}
+
 export const register: Register = (on: On, options: PluginOptions) => {
   let compacting = false;
   let retryAtPercent = 0;
+  let session: Savings = { ...NO_SAVINGS };
+  // The context measured before a compaction; its "after" is known at the next turn.
+  let pending: number | undefined;
+  // Registered on session.start, or on the first turn when the plugin was loaded mid-session.
+  let commandRegistered = false;
+
+  on('session.start', async ($, event, next) => {
+    if (!commandRegistered) {
+      commandRegistered = true;
+      await registerCommand($);
+    }
+    return next(event);
+  });
+
+  on('command.run', { command: 'fast-jev' }, async ($) => ({
+    text: [savingsLine('this session', session), savingsLine('all time', await allTimeSavings($))].join('\n'),
+  }));
 
   on('session.compact', async ($, event, next) => {
     // When this plugin triggered the compaction itself, a fallback would summarize
@@ -298,6 +359,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
     try {
       const configured = await configure($, options);
       const config = { ...configured, apiKey: await getApiKey($, configured) };
+      const before = (await contextTokens($)).tokens;
       const { result, messages } = await compactSession(event.messages, config, async (url, init) => {
         const response = await $.http.fetch(url, init);
         return { status: response.status, ok: response.ok, text: response.text };
@@ -306,6 +368,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
       if (reductionRatio(result) < config.minReductionRatio) {
         return fallback(`below ${percent(config.minReductionRatio)} minimum: ${summarize(result)}`);
       }
+      if (event.trigger !== 'precompute') pending = before;
       notify(
         $,
         `kept ${messages.length}/${event.messages.length} messages, no summary (${summarize(result)})`,
@@ -317,10 +380,20 @@ export const register: Register = (on: On, options: PluginOptions) => {
   });
 
   on('turn.complete', async ($, event: TurnCompleteInput, next) => {
+    if (!commandRegistered) {
+      commandRegistered = true;
+      await registerCommand($);
+    }
     if (compacting) return next(event);
     try {
       const configured = await configure($, options);
-      const { context } = await $.session.usage();
+      const context = await contextTokens($);
+      if (pending !== undefined && context.tokens !== undefined) {
+        session = add(session, pending, context.tokens);
+        await $.store.set('savings', add(await allTimeSavings($), pending, context.tokens));
+        $.ui.log(`context ${k(pending)} → ${k(context.tokens)} tokens after Jev compaction (−${k(pending - context.tokens)}); /fast-jev for totals`);
+        pending = undefined;
+      }
       const current = context.percent ?? 0;
       if (current < Math.max(configured.compactAtPercent, retryAtPercent)) return next(event);
       compacting = true;

@@ -44,11 +44,17 @@ built-in compaction summary with the original messages.
    stays under `maxRequestTokens` (30k by default, under Jev's 32k request
    limit). The same full state is resent with every request; requests run
    concurrently and their answers are merged.
-6. Decisions per call, against `keepThreshold`:
-   - `keepResult ≥ threshold` → keep call and result;
-   - else `keepCall ≥ threshold` → keep the call, truncate the result to its
-     first `truncateHeadChars` characters plus a one-line note;
-   - else → remove the call together with its result.
+6. Decisions per call. Jev ranks, the code decides: its probabilities cluster
+   low and shift between transcripts, so an absolute threshold alone tends to
+   drop everything.
+   - `keepResult ≥ keepThreshold` → keep call and result;
+   - else → keep the call, truncate the result to its first
+     `truncateHeadChars` characters plus a one-line note;
+   - if the transcript is still not `targetReduction` (50%) smaller, whole
+     calls with `keepCall < keepThreshold` are removed together with their
+     result, least needed first by `keepCall`, only until it is.
+   `targetReduction: 0` restores the pure threshold rule (a call below the
+   threshold on both questions is removed).
 7. The message list is rebuilt: a message that loses all its content is
    removed, untouched messages are returned as the same objects, and no result
    is ever left without its call.
@@ -110,6 +116,7 @@ put it in a source file.
 | `maxStateTokens` | `25000` | Estimated token ceiling for the state |
 | `maxRequestTokens` | `30000` | Estimated ceiling for state plus one batch of questions |
 | `truncateHeadChars` | `300` | Characters of a dropped tool result retained before its note |
+| `targetReduction` | `0.5` | Fraction of the transcript to remove; whole calls go least-needed-first only until it is met (`0`: threshold only) |
 
 `result.stats` reports message and character counts before and after, the
 per-reason decision counts, the state size in estimated tokens, which fitting
@@ -135,10 +142,11 @@ Claude Code 2.1.274 type reference.
 
 ### Install in Claude Code
 
-One command (Node 18+ and the `claude` CLI on PATH):
+One command (Node 18+ and the `claude` CLI on PATH); it asks for the TypeSafe
+key, hidden, or takes `--key`:
 
 ```sh
-npx -y github:luizgasparetto/fast-jev-compaction --key <your TypeSafe key>
+npx -y github:luizgasparetto/fast-jev-compaction
 ```
 
 It enables function hooks (`env.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` in
@@ -163,6 +171,12 @@ could not remove enough from a `/compact` or an engine auto-compaction, and
 `skipped (…)` when the plugin's own `compactAtPercent` trigger found nothing
 worth removing (the conversation is left alone and retried 10 points later,
 until Claude Code's own auto-compaction kicks in).
+
+`/fast-jev` shows what it saved: the context window measured (from Claude
+Code's own token counts) right before and right after each compaction that
+replaced the summary, this session and all time, plus the summary calls
+avoided — each one would have sent that whole context to the model once
+more. The same numbers are logged after every compaction.
 
 Tuning is by environment variable, `FAST_JEV_<OPTION>` in snake case
 (`FAST_JEV_KEEP_THRESHOLD=0.6`, `FAST_JEV_COMPACT_AT_PERCENT=75`, …), for the
