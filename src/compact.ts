@@ -21,6 +21,7 @@ export const DEFAULT_OPTIONS: ResolvedCompactOptions = {
   maxStateTokens: 25_000,
   maxRequestTokens: 30_000,
   truncateHeadChars: 300,
+  targetReduction: 0.5,
 };
 
 /** Tokens the request envelope (`model`, key names) adds around state and questions. */
@@ -48,6 +49,10 @@ export function resolveOptions(options: CompactOptions = {}): ResolvedCompactOpt
     truncateHeadChars: Math.max(
       0,
       Math.floor(finite(options.truncateHeadChars, DEFAULT_OPTIONS.truncateHeadChars)),
+    ),
+    targetReduction: Math.min(
+      1,
+      Math.max(0, finite(options.targetReduction, DEFAULT_OPTIONS.targetReduction)),
     ),
   };
 }
@@ -281,12 +286,27 @@ export async function compact(
   const decisions = calls.map((call) =>
     decideCall(call, answers.get(call.id) ?? { keepCall: 1, keepResult: 1 }, resolved),
   );
-  const kept = applyDecisions(
-    messages,
-    decisions,
-    calls,
-    resolved.truncateHeadChars,
-  );
+  const apply = () => applyDecisions(messages, decisions, calls, resolved.truncateHeadChars);
+  const reduction = (kept: Message[]) =>
+    charsBefore === 0 ? 0 : 1 - kept.reduce((sum, m) => sum + messageChars(m), 0) / charsBefore;
+  let kept = apply();
+  if (resolved.targetReduction > 0) {
+    // Jev ranks, the code decides: its probabilities cluster low and shift between
+    // transcripts, so an absolute threshold alone tends to drop everything. Every
+    // call keeps at least its truncated result; whole calls go least-needed-first,
+    // and only until the target reduction is met.
+    const ranked = decisions
+      .filter((decision) => decision.action === 'drop_call')
+      .sort((a, b) => a.keepCall - b.keepCall);
+    for (const decision of ranked) Object.assign(decision, { action: 'drop_result', reason: 'result_dropped' });
+    kept = apply();
+    // ponytail: re-applies all decisions per dropped call, O(calls × messages); fine for transcripts.
+    for (const decision of ranked) {
+      if (reduction(kept) >= resolved.targetReduction) break;
+      Object.assign(decision, { action: 'drop_call', reason: 'call_dropped' });
+      kept = apply();
+    }
+  }
   return {
     messages: kept,
     decisions,

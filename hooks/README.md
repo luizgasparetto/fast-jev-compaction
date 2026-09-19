@@ -55,6 +55,7 @@ through environment variables (for example in `env` of `~/.claude/settings.json`
 | `FAST_JEV_MAX_STATE_TOKENS` | `25000` |
 | `FAST_JEV_MAX_REQUEST_TOKENS` | `30000` |
 | `FAST_JEV_TRUNCATE_HEAD_CHARS` | `300` |
+| `FAST_JEV_TARGET_REDUCTION` | `0.5` |
 | `FAST_JEV_MODEL` | `jev-latest` |
 | `FAST_JEV_GOAL` | last user prompts |
 
@@ -73,6 +74,12 @@ reduction, per-reason counts, state size and request count; a per-call
 `turn.complete` hook requests
 compaction when `context.percent` reaches `compactAtPercent`, with an
 in-flight guard and that back-off.
+
+The hook measures each compaction that replaced the summary: `context.tokens`
+from `$.session.usage()` right before it and at the next `turn.complete`, kept
+per session in memory and all time in `$.store` under `savings`. `/fast-jev`
+(registered on `session.start`, or on the first turn when the plugin was
+loaded mid-session) prints both, with the summary calls avoided.
 
 ## Scope and caveat
 

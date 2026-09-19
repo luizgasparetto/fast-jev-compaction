@@ -81,23 +81,29 @@ describe('env options', () => {
 });
 
 describe('register', () => {
-  function engine(fetchFn: ReturnType<typeof jevFetch>, percent: number) {
+  function engine(fetchFn: ReturnType<typeof jevFetch>, percent: number, tokens?: number) {
     const handlers: Record<string, (...args: unknown[]) => Promise<unknown>> = {};
     const logs: string[] = [];
+    const store: Record<string, unknown> = {};
+    const commands: string[] = [];
     const $ = {
       env: { get: async () => undefined },
       settings: { read: async () => ({}) },
       http: { fetch: fetchFn },
       ui: { log: (t: string) => logs.push(t), toast: () => {} },
+      store: { get: async (k: string) => store[k], set: async (k: string, v: unknown) => { store[k] = v; } },
+      command: { register: async (spec: { name: string }) => { commands.push(spec.name); } },
       session: {
-        usage: async () => ({ context: { percent } }),
+        usage: async () => ({ context: { percent, tokens } }),
         compact: () => handlers['session.compact']!($, { trigger: 'plugin', messages: transcript() }, async () => ({ messages: [] })),
       },
     };
-    register(((name: string, handler: (...args: unknown[]) => Promise<unknown>) => { handlers[name] = handler; }) as never, { apiKey: 'k' });
+    const on = (name: string, a: unknown, b?: unknown) => { handlers[name] = (b ?? a) as (...args: unknown[]) => Promise<unknown>; };
+    register(on as never, { apiKey: 'k', preserveRecentMessages: 1 });
     const compact = (trigger: string) => handlers['session.compact']!($, { trigger, messages: transcript() }, async () => 'built-in');
     const turn = () => handlers['turn.complete']!($, {}, async () => 'next');
-    return { compact, turn, logs };
+    const command = () => handlers['command.run']!($, { command: 'fast-jev', args: '' }, async () => 'built-in') as Promise<{ text: string }>;
+    return { compact, turn, command, logs, store, commands, setTokens: (t: number) => { tokens = t; } };
   }
 
   it('skips instead of summarizing when it triggered the compaction itself', async () => {
@@ -112,6 +118,20 @@ describe('register', () => {
     await turn();
     await turn();
     expect(logs.filter((l) => l.startsWith('skipped ('))).toHaveLength(1);
+  });
+
+  it('measures the context before and after a compaction and serves /fast-jev', async () => {
+    const { compact, turn, command, store, commands, setTokens } = engine(jevFetch(() => 0.1), 10, 120_000);
+    await turn();
+    expect(commands).toEqual(['fast-jev']);
+    expect((await command()).text).toBe('this session: no Jev compaction yet' + '\n' + 'all time: no Jev compaction yet');
+    expect(await compact('auto')).toHaveProperty('messages');
+    setTokens(30_000);
+    await turn();
+    expect(store['savings']).toEqual({ compactions: 1, tokensBefore: 120_000, tokensAfter: 30_000 });
+    expect((await command()).text).toContain('this session: 1 compaction(s), context 120k → 30k tokens (−90k, 75%); 1 summary call(s) avoided (~120k input tokens)');
+    await turn();
+    expect((store['savings'] as { compactions: number }).compactions).toBe(1);
   });
 });
 
@@ -159,7 +179,7 @@ describe('session message mapping', () => {
 describe('compactSession', () => {
   it('runs the library over the engine fetch and reports the outcome', async () => {
     const bodies: string[] = [];
-    const config = { ...resolveHookConfig({ preserveRecentMessages: 1 }), apiKey: 'k', model: 'jev-x' };
+    const config = { ...resolveHookConfig({ preserveRecentMessages: 1, targetReduction: 0 }), apiKey: 'k', model: 'jev-x' };
     const { result: output, messages } = await compactSession(
       transcript(),
       config,
@@ -175,7 +195,7 @@ describe('compactSession', () => {
   });
 
   it('splits a long decision log into ui.log lines under the host limit', async () => {
-    const config = { ...resolveHookConfig({ preserveRecentMessages: 1 }), apiKey: 'k' };
+    const config = { ...resolveHookConfig({ preserveRecentMessages: 1, targetReduction: 0 }), apiKey: 'k' };
     const { result: output } = await compactSession(transcript(), config, jevFetch(() => 0.1));
     const lines = decisionLogLines(output, 60);
     expect(lines).toEqual([

@@ -364,6 +364,23 @@ describe('compact', () => {
     expect(reductionRatio(output)).toBeGreaterThan(0);
   });
 
+  it('drops whole calls least-needed-first only until the target reduction is met', async () => {
+    // fileA and fileB are 1000 chars each; the Bash result is tiny. Jev ranks t1 lowest.
+    const score = (name: string) => ({ call_t1: 0.1, call_t2: 0.2, call_t3: 0.3 })[name] ?? 0.05;
+    const low = await compact(transcript(), fakeJev(score), { preserveRecentMessages: 1, targetReduction: 0.3 });
+    // Truncating every result already removes ~55%: nothing is dropped whole.
+    expect(low.decisions.map((d) => d.action)).toEqual(['drop_result', 'drop_result', 'drop_result']);
+    expect(reductionRatio(low)).toBeGreaterThanOrEqual(0.3);
+
+    const high = await compact(transcript(), fakeJev(score), { preserveRecentMessages: 1, targetReduction: 0.8 });
+    // Every truncated result still costs its 300-char head, so calls go, t1 then t2, until 80% is gone.
+    expect(high.decisions.map((d) => d.action)).toEqual(['drop_call', 'drop_call', 'drop_result']);
+    expect(reductionRatio(high)).toBeGreaterThanOrEqual(0.8);
+
+    const legacy = await compact(transcript(), fakeJev(score), { preserveRecentMessages: 1, targetReduction: 0 });
+    expect(legacy.decisions.map((d) => d.action)).toEqual(['drop_call', 'drop_call', 'drop_call']);
+  });
+
   it('keeps everything without calling Jev when no tool call is a candidate', async () => {
     const seen: Seen[] = [];
     const messages = [message('user', 'hello'), message('assistant', 'hi')];
